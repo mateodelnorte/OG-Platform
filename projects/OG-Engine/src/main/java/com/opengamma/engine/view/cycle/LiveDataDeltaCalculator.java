@@ -17,11 +17,11 @@ import com.opengamma.engine.depgraph.DependencyGraph;
 import com.opengamma.engine.depgraph.DependencyNode;
 import com.opengamma.engine.value.ValueSpecification;
 import com.opengamma.util.ArgumentChecker;
+import com.opengamma.util.test.Profiler;
 
 /**
- * Determines which nodes in a graph have changed. A node has 'changed' if and only
- * if its subtree contains a node for which PreviousLiveDataInput != CurrentLiveDataInput.
- * Note that this excludes changes due to passage of the system clock.
+ * Determines which nodes in a graph have changed. A node has 'changed' if and only if its subtree contains a node for which PreviousLiveDataInput != CurrentLiveDataInput. Note that this excludes
+ * changes due to passage of the system clock.
  */
 public class LiveDataDeltaCalculator {
 
@@ -35,11 +35,9 @@ public class LiveDataDeltaCalculator {
   private boolean _done; // = false
 
   /**
-   * For the delta calculation to be meaningful, the caches should be populated with LiveData
-   * inputs required to compute the given dependency graph.
-   * See {@link DependencyNode#getRequiredLiveData()}
+   * For the delta calculation to be meaningful, the caches should be populated with LiveData inputs required to compute the given dependency graph. See {@link DependencyNode#getRequiredLiveData()}
    * and {@link ViewComputationCache#getValue(ValueSpecification)}.
-   *
+   * 
    * @param graph Dependency graph
    * @param cache Contains CurrentLiveDataInputs (for the given graph)
    * @param previousCache Contains PreviousLiveDataInputs (for the given graph)
@@ -69,16 +67,23 @@ public class LiveDataDeltaCalculator {
     return Collections.unmodifiableSet(_unchangedNodes);
   }
 
+  private static final Profiler s_computeDelta = Profiler.create(LiveDataDeltaCalculator.class, "computeDelta");
+
   public void computeDelta() {
-    if (_done) {
-      throw new IllegalStateException("Cannot determine delta twice");
-    }
+    s_computeDelta.begin();
+    try {
+      if (_done) {
+        throw new IllegalStateException("Cannot determine delta twice");
+      }
 
-    for (final DependencyNode rootNode : _graph.getRootNodes()) {
-      computeDelta(rootNode);
-    }
+      for (final DependencyNode rootNode : _graph.getRootNodes()) {
+        computeDelta(rootNode);
+      }
 
-    _done = true;
+      _done = true;
+    } finally {
+      s_computeDelta.end();
+    }
   }
 
   private boolean computeDelta(final DependencyNode node) {

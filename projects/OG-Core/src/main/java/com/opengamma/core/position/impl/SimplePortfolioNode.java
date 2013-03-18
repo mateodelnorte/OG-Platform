@@ -36,17 +36,17 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
    * Debugging flag for artificially limiting the size of all portfolios. Use this to truncate large portfolios to isolate error cases more easily. The default value is off but can be controlled by
    * the {@code SimplePortfolioNode.debugFlag} property.
    */
-  private static final boolean DEBUG_FLAG = System.getProperty("SimplePortfolioNode.debugFlag", "FALSE").equalsIgnoreCase("TRUE");
+  private static final boolean DEBUG_FLAG = System.getProperty("SimplePortfolioNode.debugFlag", "TRUE").equalsIgnoreCase("TRUE");
   /**
    * Maximum number of nodes to present immediately underneath this node. This is only used if {@link #DEBUG_FLAG} is on. The default value is 1 but can be controlled by the
    * {@code SimplePortfolioNode.debugMaxNodes} property.
    */
-  private static final int DEBUG_MAX_NODES = Integer.parseInt(System.getProperty("SimplePortfolioNode.debugMaxNodes", "1"));
+  private static final int DEBUG_MAX_NODES = Integer.parseInt(System.getProperty("SimplePortfolioNode.debugMaxNodes", "10"));
   /**
    * Maximum number of positions to present immediately underneath this node. This is only used if {@link #DEBUG_FLAG} is on. The default value is 1 but can be controlled by the
    * {@code SimplePortfolioNode.debugMaxPositions} property.
    */
-  private static final int DEBUG_MAX_POSITIONS = Integer.parseInt(System.getProperty("SimplePortfolioNode.debugMaxPositions", "1"));
+  private static final int DEBUG_MAX_POSITIONS = Integer.parseInt(System.getProperty("SimplePortfolioNode.debugMaxPositions", "10"));
 
   /**
    * The unique identifier of the node.
@@ -79,7 +79,7 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
   /**
    * Creates a portfolio node with a given name.
    * 
-   * @param name  the name of the portfolio node, null treated as empty
+   * @param name the name of the portfolio node, null treated as empty
    */
   public SimplePortfolioNode(String name) {
     _name = StringUtils.defaultString(name);
@@ -88,8 +88,8 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
   /**
    * Creates a portfolio with the specified identifier.
    * 
-   * @param uniqueId  the unique identifier, not null
-   * @param name  the name to use, null treated as empty
+   * @param uniqueId the unique identifier, not null
+   * @param name the name to use, null treated as empty
    */
   public SimplePortfolioNode(UniqueId uniqueId, String name) {
     ArgumentChecker.notNull(uniqueId, "uniqueId");
@@ -100,7 +100,7 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
   /**
    * Creates a deep copy of the specified portfolio node.
    * 
-   * @param copyFrom  the instance to copy fields from, not null
+   * @param copyFrom the instance to copy fields from, not null
    */
   public SimplePortfolioNode(final PortfolioNode copyFrom) {
     ArgumentChecker.notNull(copyFrom, "copyFrom");
@@ -131,7 +131,7 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
   /**
    * Sets the unique identifier of the node.
    * 
-   * @param uniqueId  the new unique identifier, not null
+   * @param uniqueId the new unique identifier, not null
    */
   @Override
   public void setUniqueId(UniqueId uniqueId) {
@@ -153,7 +153,7 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
   /**
    * Sets the unique identifier of the parent node, null if this is a root node.
    * 
-   * @param parentNodeId  the new parent node, null if root node
+   * @param parentNodeId the new parent node, null if root node
    */
   public void setParentNodeId(final UniqueId parentNodeId) {
     _parentNodeId = parentNodeId;
@@ -173,7 +173,7 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
   /**
    * Sets the name of the node intended for display purposes.
    * 
-   * @param name  the name, not null
+   * @param name the name, not null
    */
   public void setName(String name) {
     ArgumentChecker.notNull(name, "name");
@@ -210,7 +210,7 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
   /**
    * Adds a node to the list of immediate children.
    * 
-   * @param childNode  the child node to add, not null
+   * @param childNode the child node to add, not null
    */
   public void addChildNode(PortfolioNode childNode) {
     ArgumentChecker.notNull(childNode, "child node");
@@ -237,7 +237,7 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
   /**
    * Removes a node from the list of immediate children.
    * 
-   * @param childNode  the child node to remove, not null
+   * @param childNode the child node to remove, not null
    */
   public void removeChildNode(PortfolioNode childNode) {
     _childNodes.remove(childNode);
@@ -262,7 +262,7 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
   /**
    * Adds a node to the list of immediate children.
    * 
-   * @param position  the position to add, not null
+   * @param position the position to add, not null
    */
   public void addPosition(Position position) {
     ArgumentChecker.notNull(position, "child node");
@@ -284,7 +284,7 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
   /**
    * Removes a position from the list.
    * 
-   * @param position  the position to remove, not null
+   * @param position the position to remove, not null
    */
   public void removePosition(Position position) {
     _positions.remove(position);
@@ -292,10 +292,9 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
 
   //-------------------------------------------------------------------------
   /**
-   * Recursively finds a specific node from this node by identifier.
-   * If this node matches it is returned.
+   * Recursively finds a specific node from this node by identifier. If this node matches it is returned.
    * 
-   * @param uniqueId  the identifier, null returns null
+   * @param uniqueId the identifier, null returns null
    * @return the node, null if not found
    */
   public PortfolioNode getNode(UniqueId uniqueId) {
@@ -305,8 +304,8 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
   /**
    * Recursively finds a specific node from a node by identifier.
    * 
-   * @param node  the node to process, not null
-   * @param uniqueId  the identifier, null returns null
+   * @param node the node to process, not null
+   * @param uniqueId the identifier, null returns null
    * @return the node, null if not found
    */
   private static PortfolioNode getNode(PortfolioNode node, UniqueId uniqueId) {
@@ -327,7 +326,7 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
   /**
    * Recursively finds a specific position from this node by identifier.
    * 
-   * @param uniqueId  the identifier, null returns null
+   * @param uniqueId the identifier, null returns null
    * @return the position, null if not found
    */
   public Position getPosition(UniqueId uniqueId) {
@@ -337,8 +336,8 @@ public class SimplePortfolioNode implements PortfolioNode, MutableUniqueIdentifi
   /**
    * Recursively finds a specific position from a node by identifier.
    * 
-   * @param node  the node to process, not null
-   * @param uniqueId  the identifier, null returns null
+   * @param node the node to process, not null
+   * @param uniqueId the identifier, null returns null
    * @return the position, null if not found
    */
   private static Position getPosition(PortfolioNode node, UniqueId uniqueId) {

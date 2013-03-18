@@ -13,5 +13,10 @@
     <appender-ref ref="STDOUT" />
     <appender-ref ref="BRIDGE" />
   </root>
+  
+  <logger name="com.opengamma.engine.view.worker.SingleThreadViewProcessWorker" level="info" />
+  <logger name="com.opengamma.engine.calcnode" level="off" />
+  <logger name="com.opengamma.engine.view.worker.cache" level="debug" />
+  <logger name="com.opengamma.util.test.Profiler" level="debug" />
 
 </configuration>

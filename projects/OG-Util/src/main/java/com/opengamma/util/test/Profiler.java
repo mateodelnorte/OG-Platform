@@ -40,6 +40,10 @@ public final class Profiler {
   private int _snapshotOperations;
   private int _reset;
 
+  static {
+    enable(5000, 3);
+  }
+
   private Profiler(final String name) {
     _name = name;
   }

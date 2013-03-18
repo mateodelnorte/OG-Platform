@@ -8,6 +8,7 @@ package com.opengamma.engine.view.compilation;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,6 +33,7 @@ import com.opengamma.engine.depgraph.DependencyNodeFormatter;
 import com.opengamma.engine.depgraph.Housekeeper;
 import com.opengamma.engine.function.FunctionCompilationContext;
 import com.opengamma.engine.target.ComputationTargetReference;
+import com.opengamma.engine.target.ComputationTargetType;
 import com.opengamma.engine.value.ValueRequirement;
 import com.opengamma.engine.value.ValueSpecification;
 import com.opengamma.engine.view.ViewCalculationConfiguration;
@@ -150,18 +152,29 @@ public final class ViewDefinitionCompiler {
     protected abstract Portfolio resolveAndCompile();
 
     private void removeUnusedResolutions(final Collection<DependencyGraph> graphs, final Portfolio portfolio) {
-      final Set<UniqueId> validIdentifiers = new HashSet<UniqueId>();
+      final Set<UniqueId> validIdentifiers = new HashSet<UniqueId>(getResolutions().size());
       if (portfolio != null) {
         validIdentifiers.add(portfolio.getUniqueId());
       }
-      // TODO: The resolution map must contain an entry for all structural nodes; just in case there are no nodes in the graph form them
-      // E.g. if TRADE level values are on, then it must contain all POSITION oid->uid references regardless of whether there are position level aggregates
       for (DependencyGraph graph : graphs) {
         for (final ComputationTargetSpecification target : graph.getAllComputationTargets()) {
           validIdentifiers.add(target.getUniqueId());
         }
       }
-      getResolutions().values().retainAll(validIdentifiers);
+      final Iterator<Map.Entry<ComputationTargetReference, UniqueId>> itrResolutions = getResolutions().entrySet().iterator();
+      while (itrResolutions.hasNext()) {
+        final Map.Entry<ComputationTargetReference, UniqueId> resolution = itrResolutions.next();
+        if (resolution.getKey().getType().isTargetType(ComputationTargetType.POSITION)) {
+          // Keep all positions; they'll be in our graph. It's a naughty function that could start requesting items for positions outside of the portfolio!
+          continue;
+        }
+        if (validIdentifiers.contains(resolution.getValue())) {
+          // Keep any resolutions relating to nodes in the graph
+          continue;
+        }
+        // Delete anything else; legacy from failed resolutions
+        itrResolutions.remove();
+      }
     }
 
     /**

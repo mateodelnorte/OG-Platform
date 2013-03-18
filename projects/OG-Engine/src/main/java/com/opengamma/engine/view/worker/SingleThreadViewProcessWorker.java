@@ -49,6 +49,7 @@ import com.opengamma.engine.marketdata.availability.MarketDataAvailabilityProvid
 import com.opengamma.engine.marketdata.spec.MarketDataSpecification;
 import com.opengamma.engine.resource.EngineResourceReference;
 import com.opengamma.engine.target.ComputationTargetReference;
+import com.opengamma.engine.target.ComputationTargetType;
 import com.opengamma.engine.value.ValueRequirement;
 import com.opengamma.engine.value.ValueSpecification;
 import com.opengamma.engine.view.ViewCalculationConfiguration;
@@ -68,6 +69,7 @@ import com.opengamma.engine.view.execution.ViewExecutionFlags;
 import com.opengamma.engine.view.execution.ViewExecutionOptions;
 import com.opengamma.engine.view.impl.ViewProcessContext;
 import com.opengamma.engine.view.listener.ComputationResultListener;
+import com.opengamma.engine.view.worker.cache.PLAT3249;
 import com.opengamma.engine.view.worker.cache.ViewExecutionCacheKey;
 import com.opengamma.engine.view.worker.trigger.CombinedViewCycleTrigger;
 import com.opengamma.engine.view.worker.trigger.FixedTimeTrigger;
@@ -85,6 +87,7 @@ import com.opengamma.util.ArgumentChecker;
 import com.opengamma.util.NamedThreadPoolFactory;
 import com.opengamma.util.TerminatableJob;
 import com.opengamma.util.monitor.OperationTimer;
+import com.opengamma.util.test.Profiler;
 import com.opengamma.util.tuple.Pair;
 
 /**
@@ -295,6 +298,10 @@ public class SingleThreadViewProcessWorker implements MarketDataListener, ViewPr
     return _job;
   }
 
+  private static final Profiler s_job_prepare = Profiler.create(SingleThreadViewProcessWorker.class, "job.prepare");
+  private static final Profiler s_job_compile = Profiler.create(SingleThreadViewProcessWorker.class, "job.compile");
+  private static final Profiler s_job_execute = Profiler.create(SingleThreadViewProcessWorker.class, "job.execute");
+
   private final class Job extends TerminatableJob {
 
     /**
@@ -318,164 +325,202 @@ public class SingleThreadViewProcessWorker implements MarketDataListener, ViewPr
         return;
       }
 
-      ViewCycleExecutionOptions executionOptions = null;
-      try {
-        if (!getExecutionOptions().getExecutionSequence().isEmpty()) {
-          executionOptions = getExecutionOptions().getExecutionSequence().getNext(getExecutionOptions().getDefaultExecutionOptions());
-          s_logger.debug("Next cycle execution options: {}", executionOptions);
-        }
-        if (executionOptions == null) {
-          s_logger.info("No more view cycle execution options");
-          jobCompleted();
-          return;
-        }
-      } catch (final Exception e) {
-        s_logger.error("Error obtaining next view cycle execution options from sequence for " + getWorkerContext(), e);
-        return;
-      }
-
-      if (executionOptions.getMarketDataSpecifications().isEmpty()) {
-        s_logger.error("No market data specifications for cycle");
-        cycleExecutionFailed(executionOptions, new OpenGammaRuntimeException("No market data specifications for cycle"));
-        return;
-      }
-
       MarketDataSnapshot marketDataSnapshot;
-      try {
-        SnapshottingViewExecutionDataProvider marketDataProvider = getMarketDataProvider();
-        if (marketDataProvider == null ||
-            !marketDataProvider.getSpecifications().equals(executionOptions.getMarketDataSpecifications())) {
-          if (marketDataProvider != null) {
-            s_logger.info("Replacing market data provider between cycles");
-          }
-          replaceMarketDataProvider(executionOptions.getMarketDataSpecifications());
-          marketDataProvider = getMarketDataProvider();
-        }
-        // Obtain the snapshot in case it is needed, but don't explicitly initialise it until the data is required
-        marketDataSnapshot = marketDataProvider.snapshot();
-      } catch (final Exception e) {
-        s_logger.error("Error with market data provider", e);
-        cycleExecutionFailed(executionOptions, new OpenGammaRuntimeException("Error with market data provider", e));
-        return;
-      }
-
+      ViewCycleExecutionOptions executionOptions = null;
       Instant compilationValuationTime;
-      try {
-        if (executionOptions.getValuationTime() != null) {
-          compilationValuationTime = executionOptions.getValuationTime();
-        } else {
-          // Neither the cycle-specific options nor the defaults have overridden the valuation time so use the time
-          // associated with the market data snapshot. To avoid initialising the snapshot perhaps before the required
-          // inputs are known or even subscribed to, only ask for an indication at the moment.
-          compilationValuationTime = marketDataSnapshot.getSnapshotTimeIndication();
-          if (compilationValuationTime == null) {
-            throw new OpenGammaRuntimeException("Market data snapshot " + marketDataSnapshot + " produced a null indication of snapshot time");
-          }
-        }
-      } catch (final Exception e) {
-        s_logger.error("Error obtaining compilation valuation time", e);
-        cycleExecutionFailed(executionOptions, new OpenGammaRuntimeException("Error obtaining compilation valuation time", e));
-        return;
+      VersionCorrection versionCorrection;
+      CompiledViewDefinitionWithGraphs compiledViewDefinition;
+      boolean profile = (getWorkerContext() instanceof SequencePartitioningViewProcessWorker);
+      if (profile) {
+        s_job_prepare.begin();
       }
-
-      final VersionCorrection versionCorrection = getResolverVersionCorrection(executionOptions);
-      final CompiledViewDefinitionWithGraphs compiledViewDefinition;
       try {
-        final CompiledViewDefinitionWithGraphs previous = getLastCompiledViewDefinition();
-        compiledViewDefinition = getCompiledViewDefinition(compilationValuationTime, versionCorrection);
-        if (compiledViewDefinition == null) {
-          s_logger.warn("Job terminated during view compilation");
-          return;
-        }
-        if (previous != compiledViewDefinition) {
-          viewDefinitionCompiled(executionOptions, compiledViewDefinition);
-        }
-      } catch (final Exception e) {
-        final String message = MessageFormat.format("Error obtaining compiled view definition {0} for time {1} at version-correction {2}", getViewDefinition().getUniqueId(),
-            compilationValuationTime, versionCorrection);
-        s_logger.error(message);
-        cycleExecutionFailed(executionOptions, new OpenGammaRuntimeException(message, e));
-        return;
-      }
 
-      setMarketDataSubscriptions(compiledViewDefinition.getMarketDataRequirements());
-      try {
-        if (getExecutionOptions().getFlags().contains(ViewExecutionFlags.AWAIT_MARKET_DATA)) {
-          marketDataSnapshot.init(compiledViewDefinition.getMarketDataRequirements(), MARKET_DATA_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
-        } else {
-          marketDataSnapshot.init();
-        }
-        if (executionOptions.getValuationTime() == null) {
-          executionOptions = ViewCycleExecutionOptions.builder().setValuationTime(marketDataSnapshot.getSnapshotTime()).setMarketDataSpecifications(executionOptions.getMarketDataSpecifications())
-              .create();
-        }
-      } catch (final Exception e) {
-        s_logger.error("Error initializing snapshot {}", marketDataSnapshot);
-        cycleExecutionFailed(executionOptions, new OpenGammaRuntimeException("Error initializing snapshot" + marketDataSnapshot, e));
-      }
-
-      EngineResourceReference<SingleComputationCycle> cycleReference;
-      try {
-        cycleReference = createCycle(executionOptions, compiledViewDefinition, versionCorrection);
-      } catch (final Exception e) {
-        s_logger.error("Error creating next view cycle for " + getWorkerContext(), e);
-        return;
-      }
-
-      if (_executeCycles) {
+        //ViewCycleExecutionOptions executionOptions = null;
         try {
-          final SingleComputationCycle singleComputationCycle = cycleReference.get();
-          final HashMap<String, Collection<ComputationTargetSpecification>> configToComputationTargets = new HashMap<String, Collection<ComputationTargetSpecification>>();
-          final HashMap<String, Map<ValueSpecification, Set<ValueRequirement>>> configToTerminalOutputs = new HashMap<String, Map<ValueSpecification, Set<ValueRequirement>>>();
-          for (DependencyGraphExplorer graphExp : compiledViewDefinition.getDependencyGraphExplorers()) {
-            final DependencyGraph graph = graphExp.getWholeGraph();
-            configToComputationTargets.put(graph.getCalculationConfigurationName(), graph.getAllComputationTargets());
-            configToTerminalOutputs.put(graph.getCalculationConfigurationName(), graph.getTerminalOutputs());
+          if (!getExecutionOptions().getExecutionSequence().isEmpty()) {
+            executionOptions = getExecutionOptions().getExecutionSequence().getNext(getExecutionOptions().getDefaultExecutionOptions());
+            s_logger.debug("Next cycle execution options: {}", executionOptions);
           }
-          cycleStarted(new DefaultViewCycleMetadata(
-              cycleReference.get().getUniqueId(),
-              marketDataSnapshot.getUniqueId(),
-              compiledViewDefinition.getViewDefinition().getUniqueId(),
-              versionCorrection,
-              executionOptions.getValuationTime(),
-              singleComputationCycle.getAllCalculationConfigurationNames(),
-              configToComputationTargets,
-              configToTerminalOutputs));
-          executeViewCycle(cycleType, cycleReference, marketDataSnapshot);
-        } catch (final InterruptedException e) {
-          // Execution interrupted - don't propagate as failure
-          s_logger.info("View cycle execution interrupted for {}", getWorkerContext());
-          cycleReference.release();
-          return;
+          if (executionOptions == null) {
+            s_logger.info("No more view cycle execution options");
+            jobCompleted();
+            return;
+          }
         } catch (final Exception e) {
-          // Execution failed
-          s_logger.error("View cycle execution failed for " + getWorkerContext(), e);
-          cycleReference.release();
-          cycleExecutionFailed(executionOptions, e);
+          s_logger.error("Error obtaining next view cycle execution options from sequence for " + getWorkerContext(), e);
           return;
         }
-      }
 
-      // Don't push the results through if we've been terminated, since another computation job could be running already
-      // and the fact that we've been terminated means the view is no longer interested in the result. Just die quietly.
-      if (isTerminated()) {
-        cycleReference.release();
-        return;
-      }
-
-      if (_executeCycles) {
-        cycleCompleted(cycleReference.get());
-      }
-
-      if (getExecutionOptions().getExecutionSequence().isEmpty()) {
-        jobCompleted();
-      }
-
-      if (_executeCycles) {
-        if (_previousCycleReference != null) {
-          _previousCycleReference.release();
+        if (executionOptions.getMarketDataSpecifications().isEmpty()) {
+          s_logger.error("No market data specifications for cycle");
+          cycleExecutionFailed(executionOptions, new OpenGammaRuntimeException("No market data specifications for cycle"));
+          return;
         }
-        _previousCycleReference = cycleReference;
+
+        //MarketDataSnapshot marketDataSnapshot;
+        try {
+          SnapshottingViewExecutionDataProvider marketDataProvider = getMarketDataProvider();
+          if (marketDataProvider == null ||
+              !marketDataProvider.getSpecifications().equals(executionOptions.getMarketDataSpecifications())) {
+            if (marketDataProvider != null) {
+              s_logger.info("Replacing market data provider between cycles");
+            }
+            replaceMarketDataProvider(executionOptions.getMarketDataSpecifications());
+            marketDataProvider = getMarketDataProvider();
+          }
+          // Obtain the snapshot in case it is needed, but don't explicitly initialise it until the data is required
+          marketDataSnapshot = marketDataProvider.snapshot();
+        } catch (final Exception e) {
+          s_logger.error("Error with market data provider", e);
+          cycleExecutionFailed(executionOptions, new OpenGammaRuntimeException("Error with market data provider", e));
+          return;
+        }
+
+        //Instant compilationValuationTime;
+        try {
+          if (executionOptions.getValuationTime() != null) {
+            compilationValuationTime = executionOptions.getValuationTime();
+          } else {
+            // Neither the cycle-specific options nor the defaults have overridden the valuation time so use the time
+            // associated with the market data snapshot. To avoid initialising the snapshot perhaps before the required
+            // inputs are known or even subscribed to, only ask for an indication at the moment.
+            compilationValuationTime = marketDataSnapshot.getSnapshotTimeIndication();
+            if (compilationValuationTime == null) {
+              throw new OpenGammaRuntimeException("Market data snapshot " + marketDataSnapshot + " produced a null indication of snapshot time");
+            }
+          }
+        } catch (final Exception e) {
+          s_logger.error("Error obtaining compilation valuation time", e);
+          cycleExecutionFailed(executionOptions, new OpenGammaRuntimeException("Error obtaining compilation valuation time", e));
+          return;
+        }
+
+      } finally {
+        if (profile) {
+          s_job_prepare.end();
+        }
+      }
+      if (profile) {
+        s_job_compile.begin();
+      }
+      try {
+
+        /*final VersionCorrection */versionCorrection = getResolverVersionCorrection(executionOptions);
+        //final CompiledViewDefinitionWithGraphs compiledViewDefinition;
+        try {
+          // Don't query the cache so that the process gets a "compiled" message even if a cached compilation is used
+          final CompiledViewDefinitionWithGraphs previous = _latestCompiledViewDefinition;
+          compiledViewDefinition = getCompiledViewDefinition(compilationValuationTime, versionCorrection);
+          if (compiledViewDefinition == null) {
+            s_logger.warn("Job terminated during view compilation");
+            return;
+          }
+          if (previous != compiledViewDefinition) {
+            viewDefinitionCompiled(executionOptions, compiledViewDefinition);
+          }
+        } catch (final Exception e) {
+          final String message = MessageFormat.format("Error obtaining compiled view definition {0} for time {1} at version-correction {2}", getViewDefinition().getUniqueId(),
+              compilationValuationTime, versionCorrection);
+          s_logger.error(message);
+          cycleExecutionFailed(executionOptions, new OpenGammaRuntimeException(message, e));
+          return;
+        }
+
+        setMarketDataSubscriptions(compiledViewDefinition.getMarketDataRequirements());
+        try {
+          if (getExecutionOptions().getFlags().contains(ViewExecutionFlags.AWAIT_MARKET_DATA)) {
+            marketDataSnapshot.init(compiledViewDefinition.getMarketDataRequirements(), MARKET_DATA_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+          } else {
+            marketDataSnapshot.init();
+          }
+          if (executionOptions.getValuationTime() == null) {
+            executionOptions = ViewCycleExecutionOptions.builder().setValuationTime(marketDataSnapshot.getSnapshotTime()).setMarketDataSpecifications(executionOptions.getMarketDataSpecifications())
+                .create();
+          }
+        } catch (final Exception e) {
+          s_logger.error("Error initializing snapshot {}", marketDataSnapshot);
+          cycleExecutionFailed(executionOptions, new OpenGammaRuntimeException("Error initializing snapshot" + marketDataSnapshot, e));
+        }
+
+      } finally {
+        if (profile) {
+          s_job_compile.end();
+        }
+      }
+      if (profile) {
+        s_job_execute.begin();
+      }
+      try {
+
+        EngineResourceReference<SingleComputationCycle> cycleReference;
+        try {
+          cycleReference = createCycle(executionOptions, compiledViewDefinition, versionCorrection);
+        } catch (final Exception e) {
+          s_logger.error("Error creating next view cycle for " + getWorkerContext(), e);
+          return;
+        }
+
+        if (_executeCycles) {
+          try {
+            final SingleComputationCycle singleComputationCycle = cycleReference.get();
+            final HashMap<String, Collection<ComputationTargetSpecification>> configToComputationTargets = new HashMap<String, Collection<ComputationTargetSpecification>>();
+            final HashMap<String, Map<ValueSpecification, Set<ValueRequirement>>> configToTerminalOutputs = new HashMap<String, Map<ValueSpecification, Set<ValueRequirement>>>();
+            for (DependencyGraphExplorer graphExp : compiledViewDefinition.getDependencyGraphExplorers()) {
+              final DependencyGraph graph = graphExp.getWholeGraph();
+              configToComputationTargets.put(graph.getCalculationConfigurationName(), graph.getAllComputationTargets());
+              configToTerminalOutputs.put(graph.getCalculationConfigurationName(), graph.getTerminalOutputs());
+            }
+            cycleStarted(new DefaultViewCycleMetadata(
+                cycleReference.get().getUniqueId(),
+                marketDataSnapshot.getUniqueId(),
+                compiledViewDefinition.getViewDefinition().getUniqueId(),
+                versionCorrection,
+                executionOptions.getValuationTime(),
+                singleComputationCycle.getAllCalculationConfigurationNames(),
+                configToComputationTargets,
+                configToTerminalOutputs));
+            executeViewCycle(cycleType, cycleReference, marketDataSnapshot);
+          } catch (final InterruptedException e) {
+            // Execution interrupted - don't propagate as failure
+            s_logger.info("View cycle execution interrupted for {}", getWorkerContext());
+            cycleReference.release();
+            return;
+          } catch (final Exception e) {
+            // Execution failed
+            s_logger.error("View cycle execution failed for " + getWorkerContext(), e);
+            cycleReference.release();
+            cycleExecutionFailed(executionOptions, e);
+            return;
+          }
+        }
+
+        // Don't push the results through if we've been terminated, since another computation job could be running already
+        // and the fact that we've been terminated means the view is no longer interested in the result. Just die quietly.
+        if (isTerminated()) {
+          cycleReference.release();
+          return;
+        }
+
+        if (_executeCycles) {
+          cycleCompleted(cycleReference.get());
+        }
+
+        if (getExecutionOptions().getExecutionSequence().isEmpty()) {
+          jobCompleted();
+        }
+
+        if (_executeCycles) {
+          if (_previousCycleReference != null) {
+            _previousCycleReference.release();
+          }
+          _previousCycleReference = cycleReference;
+        }
+
+      } finally {
+        if (profile) {
+          s_job_execute.end();
+        }
       }
     }
 
@@ -486,7 +531,7 @@ public class SingleThreadViewProcessWorker implements MarketDataListener, ViewPr
       }
       unsubscribeFromTargetResolverChanges();
       removeMarketDataProvider();
-      setLastCompiledViewDefinition(null);
+      cacheCompiledViewDefinition(null);
     }
 
     @Override
@@ -978,13 +1023,13 @@ public class SingleThreadViewProcessWorker implements MarketDataListener, ViewPr
     executionCacheLock.lock();
     boolean locked = true;
     try {
-      compiledViewDefinition = getLastCompiledViewDefinition();
+      compiledViewDefinition = getCachedCompiledViewDefinition();
       Map<String, Pair<DependencyGraph, Set<ValueRequirement>>> previousGraphs = null;
       ConcurrentMap<ComputationTargetReference, UniqueId> previousResolutions = null;
       boolean portfolioFull = false;
+      boolean marketDataProviderDirty = _marketDataProviderDirty;
+      _marketDataProviderDirty = false;
       if (compiledViewDefinition != null) {
-        boolean marketDataProviderDirty = _marketDataProviderDirty;
-        _marketDataProviderDirty = false;
         executionCacheLock.unlock();
         locked = false;
         do {
@@ -997,7 +1042,7 @@ public class SingleThreadViewProcessWorker implements MarketDataListener, ViewPr
           final Map<ComputationTargetReference, UniqueId> resolvedIdentifiers = compiledViewDefinition.getResolvedIdentifiers();
           // TODO: The check below works well for the historical valuation case, but if the resolver v/c is different for two workers in the 
           // group for an otherwise identical cache key then including it in the caching detail may become necessary to handle those cases.
-          if (versionCorrection.equals(compiledViewDefinition.getResolverVersionCorrection())) {
+          if (!versionCorrection.equals(compiledViewDefinition.getResolverVersionCorrection())) {
             final Set<UniqueId> invalidIdentifiers = getInvalidIdentifiers(resolvedIdentifiers, versionCorrection);
             if (invalidIdentifiers != null) {
               previousGraphs = getPreviousGraphs(previousGraphs, compiledViewDefinition);
@@ -1011,7 +1056,13 @@ public class SingleThreadViewProcessWorker implements MarketDataListener, ViewPr
               filterPreviousGraphs(previousGraphs, new InvalidTargetDependencyNodeFilter(invalidIdentifiers));
               previousResolutions = new ConcurrentHashMap<ComputationTargetReference, UniqueId>(resolvedIdentifiers.size());
               for (final Map.Entry<ComputationTargetReference, UniqueId> resolvedIdentifier : resolvedIdentifiers.entrySet()) {
-                if (!invalidIdentifiers.contains(resolvedIdentifier.getValue())) {
+                if (invalidIdentifiers.contains(resolvedIdentifier.getValue())) {
+                  if (!portfolioFull && resolvedIdentifier.getKey().getType().isTargetType(ComputationTargetType.POSITION)) {
+                    // At least one position has changed, add all portfolio targets
+                    // TODO: This is very heavy handed, we only REALLY need to add the targets for TRADEs underneath the affected POSITION if TRADE level outputs are enabled.
+                    portfolioFull = true;
+                  }
+                } else {
                   previousResolutions.put(resolvedIdentifier.getKey(), resolvedIdentifier.getValue());
                 }
               }
@@ -1046,15 +1097,17 @@ public class SingleThreadViewProcessWorker implements MarketDataListener, ViewPr
       final MarketDataAvailabilityProvider availabilityProvider = getMarketDataProvider().getAvailabilityProvider();
       final ViewCompilationServices compilationServices = getProcessContext().asCompilationServices(availabilityProvider);
       if (previousGraphs != null) {
+        s_logger.info(portfolioFull ? "Performing incremental graph compilation with full portfolio resolution" : "Performing incremental graph compilation");
         _compilationTask = ViewDefinitionCompiler
             .incrementalCompileTask(getViewDefinition(), compilationServices, valuationTime, versionCorrection, previousGraphs, previousResolutions, portfolioFull);
       } else {
+        s_logger.info("Performing full graph compilation");
         _compilationTask = ViewDefinitionCompiler.fullCompileTask(getViewDefinition(), compilationServices, valuationTime, versionCorrection);
       }
       try {
         if (!getJob().isTerminated()) {
           compiledViewDefinition = _compilationTask.get();
-          setLastCompiledViewDefinition(compiledViewDefinition);
+          cacheCompiledViewDefinition(compiledViewDefinition);
         } else {
           return null;
         }
@@ -1094,9 +1147,12 @@ public class SingleThreadViewProcessWorker implements MarketDataListener, ViewPr
    * 
    * @return the cached compiled view definition, or null if nothing is currently cached
    */
-  public CompiledViewDefinitionWithGraphs getLastCompiledViewDefinition() {
+  public CompiledViewDefinitionWithGraphs getCachedCompiledViewDefinition() {
     if (_latestCompiledViewDefinition == null) {
       _latestCompiledViewDefinition = getProcessContext().getExecutionCache().getCompiledViewDefinitionWithGraphs(_executionCacheKey);
+      if (_latestCompiledViewDefinition != null) {
+        _latestCompiledViewDefinition = PLAT3249.deepClone(_latestCompiledViewDefinition);
+      }
     }
     return _latestCompiledViewDefinition;
   }
@@ -1108,7 +1164,7 @@ public class SingleThreadViewProcessWorker implements MarketDataListener, ViewPr
    * 
    * @param latestCompiledViewDefinition the compiled view definition, may be null
    */
-  public void setLastCompiledViewDefinition(final CompiledViewDefinitionWithGraphs latestCompiledViewDefinition) {
+  public void cacheCompiledViewDefinition(final CompiledViewDefinitionWithGraphs latestCompiledViewDefinition) {
     if (latestCompiledViewDefinition != null) {
       getProcessContext().getExecutionCache().setCompiledViewDefinitionWithGraphs(_executionCacheKey, latestCompiledViewDefinition);
     }
@@ -1129,7 +1185,7 @@ public class SingleThreadViewProcessWorker implements MarketDataListener, ViewPr
     if (newViewDefinition != null) {
       _viewDefinition = newViewDefinition;
       // TODO [PLAT-3215] Might not need to discard the entire compilation at this point
-      setLastCompiledViewDefinition(null);
+      cacheCompiledViewDefinition(null);
       SnapshottingViewExecutionDataProvider marketDataProvider = getMarketDataProvider();
       _executionCacheKey = ViewExecutionCacheKey.of(newViewDefinition, marketDataProvider.getAvailabilityProvider());
       // A change in view definition might mean a change in market data user which could invalidate the resolutions
@@ -1282,7 +1338,7 @@ public class SingleThreadViewProcessWorker implements MarketDataListener, ViewPr
     if (!getExecutionOptions().getFlags().contains(ViewExecutionFlags.TRIGGER_CYCLE_ON_MARKET_DATA_CHANGED)) {
       return;
     }
-    final CompiledViewDefinitionWithGraphs compiledView = getLastCompiledViewDefinition();
+    final CompiledViewDefinitionWithGraphs compiledView = getCachedCompiledViewDefinition();
     if (compiledView == null) {
       return;
     }

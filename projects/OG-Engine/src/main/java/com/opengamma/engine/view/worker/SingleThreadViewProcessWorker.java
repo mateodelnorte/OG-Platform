@@ -557,6 +557,7 @@ public class SingleThreadViewProcessWorker implements MarketDataListener, ViewPr
           s_job_execute.end();
         }
       }
+
     }
 
     @Override

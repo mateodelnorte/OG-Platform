@@ -1,0 +1,35 @@
+-- ==========================================================================
+@NAME(SelectSecurityKeyValuesExact)
+  SELECT
+    matched_doc_id AS doc_id
+  FROM
+    (
+      SELECT
+        position_id AS matched_doc_id,
+        COUNT(position_id) AS matched_count
+      FROM
+        pos_position2idkey,
+        pos_position
+      WHERE pos_position2idkey.position_id = pos_position.id
+        AND pos_position.ver_from_instant <= :version_as_of_instant AND pos_position.ver_to_instant > :version_as_of_instant
+        AND pos_position.corr_from_instant <= :corrected_to_instant AND pos_position.corr_to_instant > :corrected_to_instant
+        AND idkey_id IN ( @INCLUDE(SelectSecurityKeyValuesOr) )
+      GROUP BY
+        position_id
+      HAVING
+        COUNT(position_id) >= :security_id_search_size
+    ) , (
+      SELECT
+        position_id AS total_doc_id,
+        COUNT(position_id) AS total_count
+      FROM
+        pos_position2idkey,
+        pos_position
+      WHERE pos_position2idkey.position_id = pos_position.id
+        AND pos_position.ver_from_instant <= :version_as_of_instant AND pos_position.ver_to_instant > :version_as_of_instant
+        AND pos_position.corr_from_instant <= :corrected_to_instant AND pos_position.corr_to_instant > :corrected_to_instant
+      GROUP BY
+        position_id
+    )
+  WHERE matched_doc_id = total_doc_id
+    AND matched_count = total_count

@@ -56,8 +56,7 @@ import com.opengamma.analytics.financial.interestrate.YieldCurveBundle;
 import com.opengamma.analytics.financial.interestrate.cash.derivative.Cash;
 import com.opengamma.analytics.financial.interestrate.cash.method.CashDiscountingMethod;
 import com.opengamma.analytics.financial.model.interestrate.curve.YieldAndDiscountCurve;
-import com.opengamma.analytics.financial.model.interestrate.curve.YieldCurve;
-import com.opengamma.analytics.math.curve.InterpolatedDoublesCurve;
+import com.opengamma.analytics.financial.schedule.ScheduleCalculator;
 import com.opengamma.analytics.math.function.Function1D;
 import com.opengamma.analytics.math.interpolation.CombinedInterpolatorExtrapolator;
 import com.opengamma.analytics.math.interpolation.CombinedInterpolatorExtrapolatorFactory;
@@ -68,6 +67,7 @@ import com.opengamma.analytics.math.matrix.DoubleMatrix1D;
 import com.opengamma.analytics.math.matrix.DoubleMatrix2D;
 import com.opengamma.analytics.math.rootfinding.newton.BroydenVectorRootFinder;
 import com.opengamma.analytics.math.rootfinding.newton.NewtonVectorRootFinder;
+import com.opengamma.analytics.util.time.TimeCalculator;
 import com.opengamma.core.config.ConfigSource;
 import com.opengamma.core.historicaltimeseries.HistoricalTimeSeries;
 import com.opengamma.core.historicaltimeseries.impl.SimpleHistoricalTimeSeries;
@@ -99,6 +99,7 @@ import com.opengamma.financial.analytics.timeseries.HistoricalTimeSeriesBundle;
 import com.opengamma.financial.analytics.timeseries.HistoricalTimeSeriesFunctionUtils;
 import com.opengamma.financial.convention.ConventionSource;
 import com.opengamma.financial.convention.DepositConvention;
+import com.opengamma.financial.convention.FXSpotConvention;
 import com.opengamma.financial.convention.businessday.BusinessDayConvention;
 import com.opengamma.financial.convention.businessday.BusinessDayConventionFactory;
 import com.opengamma.financial.convention.calendar.Calendar;
@@ -242,7 +243,6 @@ public class ImpliedDepositCurveSeriesFunction extends AbstractFunction {
     public Set<ComputedValue> execute(final FunctionExecutionContext executionContext, final FunctionInputs inputs, final ComputationTarget target,
         final Set<ValueRequirement> desiredValues) throws AsynchronousExecution {
       try {
-        final ZonedDateTime now = ZonedDateTime.now(executionContext.getValuationClock());
         final Object originalCurveObject = inputs.getValue(YIELD_CURVE_SERIES);
         if (originalCurveObject == null) {
           throw new OpenGammaRuntimeException("Could not get original curve");
@@ -271,21 +271,23 @@ public class ImpliedDepositCurveSeriesFunction extends AbstractFunction {
         final Map<LocalDate, YieldAndDiscountCurve> originalCurveSeries = (Map<LocalDate, YieldAndDiscountCurve>) originalCurveObject;
         final Map<FixedIncomeStrip, List<Double>> results = new HashMap<>();
         List<LocalDate> impliedRateDates = new ArrayList<>();
+        final ConventionSource conventionSource = OpenGammaExecutionContext.getConventionSource(executionContext);
 
+        final FXSpotConvention fxSpotConvention = (FXSpotConvention) conventionSource.getConvention(ExternalId.of("CONVENTION", "FX Spot"));
+        final int spotLag = fxSpotConvention.getSettlementDays();
+        
         for (final Map.Entry<LocalDate, YieldAndDiscountCurve> entry : originalCurveSeries.entrySet()) {
           final LocalDate valuationDate = entry.getKey();
-          final ZonedDateTime valuationDateTime = ZonedDateTime.of(valuationDate, now.toLocalTime(), now.getZone());
+          final ZonedDateTime valuationDateTime = ZonedDateTime.of(valuationDate, LocalTime.MIDNIGHT, executionContext.getValuationClock().getZone());
           final HolidaySource holidaySource = OpenGammaExecutionContext.getHolidaySource(executionContext);
-          final ConventionSource conventionSource = OpenGammaExecutionContext.getConventionSource(executionContext);
           final Calendar calendar = CalendarUtils.getCalendar(holidaySource, _currency);
           final DepositConvention convention = conventionSource.getConvention(DepositConvention.class, ExternalId.of(SCHEME_NAME, getConventionName(_currency, DEPOSIT)));
-          final int spotLag = 0;
           final ExternalId conventionSettlementRegion = convention.getRegionCalendar();
           ZonedDateTime spotDate;
           if (spotLag == 0 && conventionSettlementRegion == null) {
             spotDate = valuationDateTime;
           } else {
-            spotDate = valuationDateTime;
+            spotDate = ScheduleCalculator.getAdjustedDate(valuationDateTime, spotLag, calendar);
           }
           final YieldCurveBundle curves = new YieldCurveBundle();
           final String fullYieldCurveName = _originalCurveName + "_" + _currency;
@@ -294,15 +296,20 @@ public class ImpliedDepositCurveSeriesFunction extends AbstractFunction {
           final double[] t = new double[n];
           final double[] r = new double[n];
           int i = 0;
-          final DayCount dayCount = DayCountFactory.INSTANCE.getDayCount("Act/360"); //TODO
+          final DayCount dayCount = DayCountFactory.INSTANCE.getDayCount("Act/360"); //TODO: Get the convention from the curve.
           final String impliedDepositCurveName = _impliedCurveCalculationConfig + "_" + _currency.getCode();
           final List<InstrumentDerivative> derivatives = new ArrayList<>();
           for (final FixedIncomeStrip strip : _impliedDefinition.getStrips()) {
             final Tenor tenor = strip.getCurveNodePointTime();
-            final ZonedDateTime paymentDate = spotDate.plus(tenor.getPeriod()); // ScheduleCalculator.getAdjustedDate(spotDate, tenor.getPeriod(), MOD_FOL, calendar, true);
-            final double startTime = 0.0; // TimeCalculator.getTimeBetween(valuationDateTime, spotDate);
-            final double endTime = tenor.getPeriod().toTotalMonths() / 12.0d; // TimeCalculator.getTimeBetween(valuationDateTime, paymentDate);
-            final double accrualFactor = dayCount.getDayCountFraction(valuationDateTime, valuationDateTime.plus(tenor.getPeriod()), calendar);
+            final ZonedDateTime paymentDate;
+            if (spotLag == 0 && conventionSettlementRegion == null) {
+              paymentDate = spotDate.plus(tenor.getPeriod()); 
+            } else {
+              paymentDate = ScheduleCalculator.getAdjustedDate(spotDate, tenor.getPeriod(), MOD_FOL, calendar, false);
+            }
+            final double startTime = TimeCalculator.getTimeBetween(valuationDateTime, spotDate);
+            final double endTime = TimeCalculator.getTimeBetween(valuationDateTime, paymentDate);
+            final double accrualFactor = dayCount.getDayCountFraction(spotDate, paymentDate, calendar);
             final Cash cashFXCurve = new Cash(_currency, startTime, endTime, 1, 0, accrualFactor, fullYieldCurveName);
             final double parRate = METHOD_CASH.parRate(cashFXCurve, curves);
             final Cash cashDepositCurve = new Cash(_currency, startTime, endTime, 1, 0, accrualFactor, impliedDepositCurveName);
@@ -326,28 +333,20 @@ public class ImpliedDepositCurveSeriesFunction extends AbstractFunction {
           final NewtonVectorRootFinder rootFinder = new BroydenVectorRootFinder(absoluteTolerance, relativeTolerance, iterations, decomposition);
           final Function1D<DoubleMatrix1D, DoubleMatrix1D> curveCalculator = new MultipleYieldCurveFinderFunction(data, PAR_RATE_CALCULATOR);
           final Function1D<DoubleMatrix1D, DoubleMatrix2D> jacobianCalculator = new MultipleYieldCurveFinderJacobian(data, PAR_RATE_SENSITIVITY_CALCULATOR);
-
-          final double[] fittedYields;
           try {
-            fittedYields = rootFinder.getRoot(curveCalculator, jacobianCalculator, new DoubleMatrix1D(r)).getData();
-            YieldCurve impliedCurve = new YieldCurve("Name", InterpolatedDoublesCurve.from(t, fittedYields, interpolator));
-
-            final DoubleMatrix2D jacobianMatrix = jacobianCalculator.evaluate(new DoubleMatrix1D(fittedYields));
-
             impliedRateDates.add(valuationDate);
-
             i = 0;
             for (final FixedIncomeStrip strip : _impliedDefinition.getStrips()) {
               if (results.containsKey(strip)) {
-                results.get(strip).add(fittedYields[i++]);
+                results.get(strip).add(r[i++]);
               } else {
                 final List<Double> value = new ArrayList<>();
-                value.add(fittedYields[i++]);
+                value.add(r[i++]);
                 results.put(strip, value);
               }
             }
           } catch (Throwable t2) {
-            t2.printStackTrace();
+            s_logger.error("Exception building implied deposit curve for valuation date " + valuationDate, t2);
             continue;
           }
         }
@@ -365,7 +364,7 @@ public class ImpliedDepositCurveSeriesFunction extends AbstractFunction {
 
             bundle.add(MarketDataRequirementNames.MARKET_VALUE, id, ts);
           } catch (Exception e) {
-            e.printStackTrace();
+            s_logger.error("Exception building implied deposit curve series when adding timeseries to bundle for " + strip.getSecurityIdentifier() , e);
             break;
           }
         }
@@ -374,7 +373,7 @@ public class ImpliedDepositCurveSeriesFunction extends AbstractFunction {
         return Collections.singleton(new ComputedValue(curveSpec, bundle));
 
       } catch (Throwable t3) {
-        t3.printStackTrace();
+        s_logger.error("Exception building implied deposit curve series", t3);
         throw t3;
       }
 

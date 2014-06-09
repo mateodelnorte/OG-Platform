@@ -12,9 +12,11 @@ import java.util.Map;
 
 import org.apache.commons.lang.Validate;
 
+import com.electronifie.trace.Log;
 import com.opengamma.analytics.financial.interestrate.bond.definition.BondFixedSecurity;
 import com.opengamma.analytics.financial.interestrate.bond.definition.BondSecurity;
 import com.opengamma.analytics.financial.interestrate.payments.derivative.Coupon;
+import com.opengamma.analytics.financial.interestrate.payments.derivative.CouponFixed;
 import com.opengamma.analytics.financial.interestrate.payments.derivative.Payment;
 import com.opengamma.analytics.financial.provider.calculator.discounting.PresentValueCurveSensitivityDiscountingCalculator;
 import com.opengamma.analytics.financial.provider.calculator.discounting.PresentValueDiscountingCalculator;
@@ -159,34 +161,86 @@ public final class BondSecurityDiscountingMethod {
     return cleanPrice + bond.getAccruedInterest() / notional;
   }
 
+  public double dirtyPriceFromYield(final BondFixedSecurity bond, final double yield) {
+    return dirtyPriceFromYield(bond, yield, false);
+  }
+
   /**
    * Computes the dirty price from the conventional yield.
    * @param bond  The bond security.
    * @param yield The bond yield.
    * @return The dirty price.
    */
-  public double dirtyPriceFromYield(final BondFixedSecurity bond, final double yield) {
+  public double dirtyPriceFromYield(final BondFixedSecurity bond, final double yield, boolean enabletracing) {
     Validate.isTrue(bond.getNominal().getNumberOfPayments() == 1, "Yield: more than one nominal repayment.");
+
     final int nbCoupon = bond.getCoupon().getNumberOfPayments();
     final double nominal = bond.getNominal().getNthPayment(bond.getNominal().getNumberOfPayments() - 1).getAmount();
+
     if (bond.getYieldConvention().equals(SimpleYieldConvention.US_STREET)) {
       if (nbCoupon > 1) { // More than one coupon left
+
         final double factorOnPeriod = 1 + yield / bond.getCouponPerYear();
+
+        double periodfractional = Math.pow(factorOnPeriod, -bond.getAccrualFactorToNextCoupon());
+
         double pvAtFirstCoupon = 0;
         for (int loopcpn = 0; loopcpn < nbCoupon; loopcpn++) {
-          pvAtFirstCoupon += bond.getCoupon().getNthPayment(loopcpn).getAmount() / Math.pow(factorOnPeriod, loopcpn);
+
+          CouponFixed nthPayment = bond.getCoupon().getNthPayment(loopcpn);
+
+          double pv = nthPayment.getAmount() / Math.pow(factorOnPeriod, loopcpn); // log
+
+          pvAtFirstCoupon += pv;
+
+          if(enabletracing) {
+
+            double pvAtSettle = pv / periodfractional;
+
+            Log.trace("dates: " + nthPayment.getAccrualEndDate()
+                          + "\ttype: C"
+                          + "\tamt: " + nthPayment.getAmount()
+                          + "\tdiscount factor: " + 1 / (Math.pow(factorOnPeriod, loopcpn) / periodfractional)
+                          + "\tPV: " + pvAtSettle);
+          }
         }
-        pvAtFirstCoupon += nominal / Math.pow(factorOnPeriod, nbCoupon - 1);
-        return pvAtFirstCoupon * Math.pow(factorOnPeriod, -bond.getAccrualFactorToNextCoupon()) / nominal;
+
+        double principal = nominal / Math.pow(factorOnPeriod, nbCoupon - 1); // log
+
+        pvAtFirstCoupon += principal;
+
+        double result = pvAtFirstCoupon * periodfractional / nominal;
+
+        if(enabletracing) {
+          CouponFixed payment = bond.getCoupon().getNthPayment(nbCoupon - 1);
+
+          Log.trace("dates: " + payment.getAccrualEndDate()
+                        + "\ttype: P"
+                        + "\tamt: " + nominal
+                        + "\tdiscount factor: " + 1 / (Math.pow(factorOnPeriod, nbCoupon - 1) / periodfractional)
+                        + "\tPV: " + principal / periodfractional);
+
+          Log.trace("yield: " + yield
+                        + "\t#payments: " + nbCoupon
+                        + "\tnominal: " + nominal
+                        + "\tdirty price: " + result);
+
+        }
+        return result;
       } // In the last period: simple rate
+
+      if (enabletracing) Log.trace("\tlast coupon payment: " + (nominal + bond.getCoupon().getNthPayment(0).getAmount()) + " accrualFactorToNextCoupon: " + bond.getAccrualFactorToNextCoupon() + " bond.getCouponPerYear: " + bond.getCouponPerYear());
+
       return (nominal + bond.getCoupon().getNthPayment(0).getAmount()) / (1.0 + bond.getAccrualFactorToNextCoupon() * yield / bond.getCouponPerYear()) / nominal;
     } else if (bond.getYieldConvention().equals(SimpleYieldConvention.UK_BUMP_DMO_METHOD)) {
+
       final double factorOnPeriod = 1 + yield / bond.getCouponPerYear();
       double pvAtFirstCoupon = 0;
       for (int loopcpn = 0; loopcpn < nbCoupon; loopcpn++) {
         pvAtFirstCoupon += bond.getCoupon().getNthPayment(loopcpn).getAmount() / Math.pow(factorOnPeriod, loopcpn);
       }
       pvAtFirstCoupon += nominal / Math.pow(factorOnPeriod, nbCoupon - 1);
+
       return pvAtFirstCoupon * Math.pow(factorOnPeriod, -bond.getAccrualFactorToNextCoupon()) / nominal;
     }
     throw new UnsupportedOperationException("The convention " + bond.getYieldConvention().getConventionName() + " is not supported.");
@@ -269,6 +323,9 @@ public final class BondSecurityDiscountingMethod {
     };
     final double[] range = BRACKETER.getBracketedPoints(priceResidual, 0.00, 0.20);
     final double yield = ROOT_FINDER.getRoot(priceResidual, range[0], range[1]);
+
+    if (Log.isEnabled()) dirtyPriceFromYield(bond, yield, true);
+
     return yield;
   }
 

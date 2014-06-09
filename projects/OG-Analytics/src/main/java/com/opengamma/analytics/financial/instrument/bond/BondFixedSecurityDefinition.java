@@ -10,6 +10,7 @@ import org.threeten.bp.Period;
 import org.threeten.bp.ZonedDateTime;
 import org.threeten.bp.temporal.JulianFields;
 
+import com.electronifie.trace.Log;
 import com.opengamma.analytics.financial.instrument.InstrumentDefinitionVisitor;
 import com.opengamma.analytics.financial.instrument.annuity.AnnuityCouponFixedDefinition;
 import com.opengamma.analytics.financial.instrument.annuity.AnnuityPaymentFixedDefinition;
@@ -102,6 +103,19 @@ public class BondFixedSecurityDefinition extends BondSecurityDefinition<PaymentF
     ArgumentChecker.notNull(yieldConvention, "Yield convention");
     _yieldConvention = yieldConvention;
     _couponPerYear = (int) Math.round(1.0 / coupon.getNthPayment(0).getPaymentYearFraction());
+    _isEOM = isEOM;
+    _dayCount = dayCount;
+  }
+
+
+  public BondFixedSecurityDefinition(final AnnuityPaymentFixedDefinition nominal, final AnnuityCouponFixedDefinition coupon, final int exCouponDays, Period paymentPeriod,
+                                     final int settlementDays, final Calendar calendar, final DayCount dayCount, final YieldConvention yieldConvention, final boolean isEOM, final String issuer,
+                                     final String repoType) {
+    super(nominal, coupon, exCouponDays, settlementDays, calendar, issuer, repoType);
+    ArgumentChecker.notNull(yieldConvention, "Yield convention");
+    _yieldConvention = yieldConvention;
+    //_couponPerYear = (int) Math.round(1.0 / coupon.getNthPayment(0).getPaymentYearFraction());
+    _couponPerYear = 12 / paymentPeriod.getMonths();
     _isEOM = isEOM;
     _dayCount = dayCount;
   }
@@ -252,7 +266,7 @@ public class BondFixedSecurityDefinition extends BondSecurityDefinition<PaymentF
     final PaymentFixedDefinition[] nominalPayment = new PaymentFixedDefinition[] {new PaymentFixedDefinition(currency, businessDay.adjustDate(calendar, maturityDate),
         notional) };
     final AnnuityPaymentFixedDefinition nominal = new AnnuityPaymentFixedDefinition(nominalPayment, calendar);
-    return new BondFixedSecurityDefinition(nominal, coupon, exCouponDays, settlementDays, calendar, dayCount, yieldConvention, isEOM, issuer, repoType);
+    return new BondFixedSecurityDefinition(nominal, coupon, exCouponDays, paymentPeriod, settlementDays, calendar, dayCount, yieldConvention, isEOM, issuer, repoType);
   }
 
   /**
@@ -446,6 +460,9 @@ public class BondFixedSecurityDefinition extends BondSecurityDefinition<PaymentF
    */
   public BondFixedSecurity toDerivative(final ZonedDateTime date, final ZonedDateTime settlementDate) {
     ArgumentChecker.notNull(date, "date");
+
+    if (Log.isEnabled()) Log.trace("reference date: " + date.toString() + "\t settlement date: " +settlementDate.toString());
+
     double settleTime;
     double accruedInterestAtSettle;
     if (settlementDate.isBefore(date)) {
@@ -470,13 +487,16 @@ public class BondFixedSecurityDefinition extends BondSecurityDefinition<PaymentF
     final AnnuityCouponFixedDefinition couponDefinitionExPeriod = new AnnuityCouponFixedDefinition(couponExPeriodArray, getCalendar());
     final AnnuityCouponFixed couponStandard = couponDefinitionExPeriod.toDerivative(date);
     final AnnuityPaymentFixed nominalStandard = nominal.trimBefore(settleTime);
-    final double factorSpot = getDayCount().getAccruedInterest(couponDefinition.getNthPayment(0).getAccrualStartDate(), settlementDate,
-        couponDefinition.getNthPayment(0).getAccrualEndDate(), 1.0, _couponPerYear);
-    final double factorPeriod = getDayCount().getAccruedInterest(couponDefinition.getNthPayment(0).getAccrualStartDate(),
-        couponDefinition.getNthPayment(0).getAccrualEndDate(), couponDefinition.getNthPayment(0).getAccrualEndDate(), 1.0, _couponPerYear);
+    ZonedDateTime accrualStartDate = couponDefinition.getNthPayment(0).getAccrualStartDate();
+    ZonedDateTime accrualEndDate = couponDefinition.getNthPayment(0).getAccrualEndDate();
+
+    final double factorSpot = getDayCount().getAccruedInterest(accrualStartDate, settlementDate, accrualEndDate, 1.0, _couponPerYear);
+    final double factorPeriod = getDayCount().getAccruedInterest(accrualStartDate, accrualEndDate, accrualEndDate, 1.0, _couponPerYear);
+
     final double factor = (factorPeriod - factorSpot) / factorPeriod;
-    final BondFixedSecurity bondStandard = new BondFixedSecurity(nominalStandard, couponStandard, settleTime, accruedInterestAtSettle, factor, getYieldConvention(),
-        _couponPerYear, getIssuer());
+
+    final BondFixedSecurity bondStandard = new BondFixedSecurity(
+        nominalStandard, couponStandard, settleTime, accruedInterestAtSettle, factor, getYieldConvention(), _couponPerYear, getIssuer());
     return bondStandard;
 
   }

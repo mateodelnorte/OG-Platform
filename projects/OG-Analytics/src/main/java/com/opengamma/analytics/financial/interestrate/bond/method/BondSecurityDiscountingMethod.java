@@ -185,10 +185,14 @@ public final class BondSecurityDiscountingMethod {
     final double factorOnPeriod = 1 + yield / bond.getCouponPerYear();
     double pvAtFirstCoupon = 0;
     for (int loopcpn = 0; loopcpn < nbCoupon; loopcpn++) {
-      pvAtFirstCoupon += bond.getCoupon().getNthPayment(loopcpn).getAmount() / Math.pow(factorOnPeriod, loopcpn);
+      double amount = bond.getCoupon().getNthPayment(loopcpn).getAmount();
+      pvAtFirstCoupon += amount / Math.pow(factorOnPeriod, loopcpn);
     }
     pvAtFirstCoupon += nominal / Math.pow(factorOnPeriod, nbCoupon - 1);
-    return pvAtFirstCoupon * Math.pow(factorOnPeriod, -bond.getAccrualFactorToNextCoupon()) / nominal;
+    double accrualFactor = -bond.getAccrualFactorToNextCoupon();
+    double pow = Math.pow(factorOnPeriod, accrualFactor);
+    double result = pvAtFirstCoupon * pow / nominal;
+    return result;
   }
 
   /**
